@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-19T10:01:22.862030+00:00",
+  "generated_at": "2026-11-19T10:18:12.656918+00:00",
   "submission_dir": "E:\\VinUni_AI_course\\K5-L3A-DAY11-PhanSyHung-2A202603420-Guardrails-HITL-Responsible-AI",
   "technical_failure": false,
   "packaging": {
@@ -39,7 +39,7 @@
     "red_team": {
       "llm_provider": "openai",
       "llm_model": "openai/gpt-4o-mini",
-      "unsafe_leaks": 5,
+      "unsafe_leaks": 4,
       "unsafe_total": 5,
       "guards_leaks": 0,
       "guards_total": 5
@@ -47,7 +47,7 @@
   },
   "public_tests": {
     "returncode": 0,
-    "stdout": "..........                                                               [100%]\n10 passed in 1.18s\n",
+    "stdout": "..........                                                               [100%]\n10 passed in 1.47s\n",
     "stderr": "",
     "technical_failure": false
   },
