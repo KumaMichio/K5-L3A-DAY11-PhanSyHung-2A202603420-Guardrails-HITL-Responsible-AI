@@ -37,29 +37,61 @@ def content_filter(response: str) -> dict:
         dict with 'safe', 'issues', and 'redacted' keys
     """
     issues = []
-    redacted = response
+    redacted = response or ""
 
-    # PII patterns to check
-    PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
-    }
-
+    # Order matters: secrets first, then phone before national ID so a
+    # 10/11-digit phone number is not half-matched as a 9-digit CMND.
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
+        matches = re.findall(pattern, redacted, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    # Obfuscated secret check: spacing/punctuation tricks ("a d m i n 1 2 3",
+    # "sk_vinbank_secret_2024") survive the regexes above, so compare squashed text.
+    if contains_protected_secret(redacted):
+        issues.append("obfuscated_secret: protected value detected")
 
     return {
         "safe": len(issues) == 0,
         "issues": issues,
         "redacted": redacted,
     }
+
+
+# Kinds of issue that mean internal data leaked → withhold the whole reply
+SECRET_ISSUE_KINDS = ("api_key", "password", "internal_host", "known_secret", "obfuscated_secret")
+
+PII_PATTERNS = {
+    # --- Secrets / internal config ---
+    "api_key": r"\bsk-[A-Za-z0-9_-]{6,}",
+    "password": r"\b(?:password|passwd|pwd|mat\s*khau|mật\s*khẩu)\s*(?:is|là|=|:)\s*\S+",
+    "internal_host": r"\b[\w.-]+\.internal(?::\d{2,5})?\b",
+    "known_secret": "|".join(re.escape(s) for s in ("admin123",)),
+    # --- PII ---
+    "email": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}",
+    "phone_vn": r"(?:\+84|\b0)(?:[\s.-]?\d){9,10}\b",
+    "national_id": r"\b\d{12}\b|\b\d{9}\b",
+}
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").casefold())
+
+
+def _protected_needles() -> list[str]:
+    try:
+        from core.config import DEMO_SECRETS
+    except Exception:  # pragma: no cover - config always importable in lab
+        DEMO_SECRETS = []
+    needles = {_squash(s) for s in DEMO_SECRETS} | {"admin123", "skvinbanksecret2024", "dbvinbankinternal"}
+    return [n for n in needles if len(n) >= 6]
+
+
+def contains_protected_secret(text: str) -> bool:
+    """True if any protected value appears, ignoring case, spaces and punctuation."""
+    squashed = _squash(text)
+    return any(n in squashed for n in _protected_needles())
 
 
 # ============================================================
@@ -140,6 +172,12 @@ async def llm_safety_check(response_text: str) -> dict:
 #   - Return the (possibly modified) llm_response, or None to keep original
 # ============================================================
 
+OUTPUT_BLOCK_MESSAGE = (
+    "I'm sorry, I can't share internal system details. "
+    "How else can I help with your VinBank account?"
+)
+
+
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
     """Plugin that checks agent output before sending to user."""
 
@@ -149,6 +187,7 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         self.blocked_count = 0
         self.redacted_count = 0
         self.total_count = 0
+        self.last_action: str | None = None
 
     def _extract_text(self, llm_response) -> str:
         """Extract text from LLM response."""
@@ -172,16 +211,42 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        self.last_action = None
+        result = content_filter(response_text)
+        if not result["safe"]:
+            leaked_secret = any(
+                issue.split(":", 1)[0] in SECRET_ISSUE_KINDS for issue in result["issues"]
+            )
+            if leaked_secret:
+                # Internal data in the reply: withhold the whole answer (fail-closed);
+                # a partially redacted secret can still hint at format/length.
+                self.blocked_count += 1
+                self.last_action = "blocked"
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=OUTPUT_BLOCK_MESSAGE)],
+                )
+                return llm_response
+            # Only customer PII: keep the answer, mask the PII.
+            self.redacted_count += 1
+            self.last_action = "redacted"
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=result["redacted"])],
+            )
+            response_text = result["redacted"]
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            verdict = await llm_safety_check(response_text)
+            if not verdict["safe"]:
+                self.blocked_count += 1
+                self.last_action = "blocked"
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=OUTPUT_BLOCK_MESSAGE)],
+                )
+
+        return llm_response
 
 
 # ============================================================
