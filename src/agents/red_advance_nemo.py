@@ -237,12 +237,18 @@ def _model_entry(provider: str, model: str) -> dict:
             "api_key_env_var": "GOOGLE_API_KEY",
             "parameters": {"base_url": GEMINI_OPENAI_BASE_URL},
         }
-    return {
+    entry = {
         "type": "main",
         "engine": "openai",
         "model": model,
         "api_key_env_var": "OPENAI_API_KEY",
     }
+    # Routing only (e.g. OpenAI models via OpenRouter): NeMo's client does not read
+    # OPENAI_BASE_URL itself, so pass it explicitly. Rails/prompts are unchanged.
+    base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if base_url:
+        entry["parameters"] = {"base_url": base_url}
+    return entry
 
 
 def build_rails_dict(
